@@ -6,7 +6,7 @@ import type { Task } from "@/types/database";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Input } from "@/components/ui/Input";
-import { cn } from "@/lib/utils";
+import { cn, todayLocalDateString } from "@/lib/utils";
 
 export function TasksPage() {
   const { user } = useAuth();
@@ -38,7 +38,7 @@ export function TasksPage() {
   // Genereert automatische taken op basis van echte data: vervallen facturen
   // en uitgaven zonder gekoppeld bonnetje. Voorkomt duplicaten per gerelateerd item.
   async function generateAutomaticTasks(userId: string) {
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayLocalDateString();
 
     const { data: overdueInvoices } = await supabase
       .from("invoices")
@@ -115,7 +115,12 @@ export function TasksPage() {
 
   async function handleDelete(task: Task) {
     if (!user) return;
-    await supabase.from("tasks").delete().eq("id", task.id);
+    if (!confirm("Deze taak verwijderen?")) return;
+    const { error } = await supabase.from("tasks").delete().eq("id", task.id);
+    if (error) {
+      alert("Verwijderen mislukt: " + error.message);
+      return;
+    }
     void loadTasks(user.id);
   }
 

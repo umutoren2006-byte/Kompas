@@ -4,7 +4,8 @@ import { TrendingUp, TrendingDown, Wallet, FileClock } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import { Card, CardContent } from "@/components/ui/Card";
-import { formatCurrency } from "@/lib/utils";
+import { euroToCents, centsToEuro, formatCentsCurrency } from "@/lib/money";
+import { monthStartLocalDateString } from "@/lib/utils";
 
 interface Stats {
   revenue: number;
@@ -24,10 +25,7 @@ export function DashboardPage() {
 
   async function loadStats(userId: string) {
     setLoading(true);
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
-      .toISOString()
-      .slice(0, 10);
+    const monthStart = monthStartLocalDateString();
 
     const [{ data: transactions }, { data: invoices }] = await Promise.all([
       supabase
@@ -42,18 +40,18 @@ export function DashboardPage() {
         .in("status", ["verzonden", "te_laat"]),
     ]);
 
-    const revenue =
+    const revenueCents =
       transactions
         ?.filter((t) => t.type === "inkomst")
-        .reduce((sum, t) => sum + Number(t.amount), 0) ?? 0;
-    const costs =
+        .reduce((sum, t) => sum + euroToCents(Number(t.amount)), 0) ?? 0;
+    const costsCents =
       transactions
         ?.filter((t) => t.type === "uitgave")
-        .reduce((sum, t) => sum + Number(t.amount), 0) ?? 0;
+        .reduce((sum, t) => sum + euroToCents(Number(t.amount)), 0) ?? 0;
 
     setStats({
-      revenue,
-      costs,
+      revenue: centsToEuro(revenueCents),
+      costs: centsToEuro(costsCents),
       openInvoices: invoices?.length ?? 0,
     });
     setLoading(false);
@@ -70,21 +68,21 @@ export function DashboardPage() {
         <StatCard
           icon={TrendingUp}
           label="Omzet (deze maand)"
-          value={formatCurrency(stats.revenue)}
+          value={formatCentsCurrency(euroToCents(stats.revenue))}
           loading={loading}
           color="text-emerald-600 bg-emerald-50"
         />
         <StatCard
           icon={TrendingDown}
           label="Kosten (deze maand)"
-          value={formatCurrency(stats.costs)}
+          value={formatCentsCurrency(euroToCents(stats.costs))}
           loading={loading}
           color="text-red-600 bg-red-50"
         />
         <StatCard
           icon={Wallet}
           label="Winst (deze maand)"
-          value={formatCurrency(profit)}
+          value={formatCentsCurrency(euroToCents(profit))}
           loading={loading}
           color="text-indigo-600 bg-indigo-50"
         />

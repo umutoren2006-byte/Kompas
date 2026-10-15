@@ -46,13 +46,31 @@ export function ReceiptsPage() {
     setTransactions(data ?? []);
   }
 
+  const ALLOWED_TYPES = ["image/png", "image/jpeg", "image/webp", "image/heic", "application/pdf"];
+  const MAX_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB, moet overeenkomen met de bucket-limiet in de migratie
+
   async function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file || !user) return;
+
+    if (!ALLOWED_TYPES.includes(file.type)) {
+      setError("Alleen afbeeldingen (png, jpg, webp, heic) of pdf-bestanden zijn toegestaan.");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+    if (file.size > MAX_SIZE_BYTES) {
+      setError("Bestand is te groot. Maximaal 10 MB per bonnetje.");
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
     setUploading(true);
     setError(null);
 
-    const path = `${user.id}/${Date.now()}-${file.name}`;
+    // Bestandsnaam saneren: alleen veilige tekens, zodat de storage-path
+    // (user_id/bestandsnaam) niet door rare tekens kan breken.
+    const safeName = file.name.replace(/[^a-zA-Z0-9.\-_]/g, "_");
+    const path = `${user.id}/${Date.now()}-${safeName}`;
     const { error: uploadError } = await supabase.storage.from("receipts").upload(path, file);
 
     if (uploadError) {

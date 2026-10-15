@@ -8,7 +8,8 @@ import { Card, CardContent } from "@/components/ui/Card";
 import { Input, Label, Select } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatDate, todayLocalDateString } from "@/lib/utils";
+import { sumLineCents, formatCentsCurrency } from "@/lib/money";
 
 const statusLabels: Record<InvoiceStatus, { label: string; variant: "default" | "success" | "warning" | "danger" | "info" }> = {
   concept: { label: "Concept", variant: "default" },
@@ -32,7 +33,7 @@ export function InvoicesPage() {
   const [invoiceNumber, setInvoiceNumber] = useState("");
   const [customerId, setCustomerId] = useState("");
   const [status, setStatus] = useState<InvoiceStatus>("concept");
-  const [issueDate, setIssueDate] = useState(new Date().toISOString().slice(0, 10));
+  const [issueDate, setIssueDate] = useState(todayLocalDateString());
   const [dueDate, setDueDate] = useState("");
   const [lines, setLines] = useState<LineDraft[]>([{ ...emptyLine }]);
   const [saving, setSaving] = useState(false);
@@ -61,16 +62,29 @@ export function InvoicesPage() {
     setCustomers(data ?? []);
   }
 
-  function openNew() {
+  async function openNew() {
     setEditing(null);
-    setInvoiceNumber(`F-${new Date().getFullYear()}-${String(invoices.length + 1).padStart(3, "0")}`);
+    setInvoiceNumber("Genereren...");
     setCustomerId(customers[0]?.id ?? "");
     setStatus("concept");
-    setIssueDate(new Date().toISOString().slice(0, 10));
+    setIssueDate(todayLocalDateString());
     setDueDate("");
     setLines([{ ...emptyLine }]);
     setError(null);
     setModalOpen(true);
+
+    // Factuurnummer wordt atomisch door de database toegekend (zie
+    // next_invoice_number RPC), zodat twee gelijktijdige nieuwe facturen
+    // nooit hetzelfde nummer kunnen krijgen.
+    const { data, error } = await supabase.rpc("next_invoice_number", {
+      p_year: new Date().getFullYear(),
+    });
+    if (error || !data) {
+      setInvoiceNumber("");
+      setError("Kon geen factuurnummer genereren: " + (error?.message ?? "onbekende fout"));
+      return;
+    }
+    setInvoiceNumber(data as string);
   }
 
   function openEdit(invoice: Invoice) {
@@ -106,86 +120,106 @@ export function InvoicesPage() {
     setLines((prev) => prev.filter((_, i) => i !== index));
   }
 
-  function lineTotal(l: LineDraft) {
-    const subtotal = l.quantity * l.unit_price;
-    return subtotal + subtotal * (l.vat_rate / 100);
-  }
+  const { totalCents } = sumLineCents(
+    lines.map((l) => ({ quantity: l.quantity, unitPrice: l.unit_price, vatRate: l.vat_rate }))
+  );
 
-  const total = lines.reduce((sum, l) => sum + lineTotal(l), 0);
+  function validateForm(): string | null {
+    if (!invoiceNumber.trim()) return "Factuurnummer ontbreekt.";
+    if (!issueDate) return "Factuurdatum is verplicht.";
+    const validLines = lines.filter((l) => l.description.trim() !== "");
+    if (validLines.length === 0) return "Voeg minimaal één factuurregel met omschrijving toe.";
+    for (const l of validLines) {
+      if (l.quantity <= 0) return "Aantal moet groter dan 0 zijn op elke regel.";
+      if (l.unit_price < 0) return "Prijs kan niet negatief zijn.";
+    }
+    return null;
+  }
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!user) return;
+
+    const validationError = validateForm();
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
     setSaving(true);
     setError(null);
 
-    const invoicePayload = {
-      user_id: user.id,
-      customer_id: customerId || null,
-      invoice_number: invoiceNumber,
-      status,
-      issue_date: issueDate,
-      due_date: dueDate || null,
-    };
-
-    let invoiceId = editing?.id;
-
-    if (editing) {
-      const { error } = await supabase.from("invoices").update(invoicePayload).eq("id", editing.id);
+    // Een betaalde factuur ligt vast: alleen de status zelf mag nog
+    // wijzigen (bv. terugzetten naar 'verzonden' bij een correctie). De
+    // factuurregels worden dan niet aangeraakt.
+    if (editing && editing.status === "betaald") {
+      const { error } = await supabase
+        .from("invoices")
+        .update({ status })
+        .eq("id", editing.id);
+      setSaving(false);
       if (error) {
-        setSaving(false);
-        setError(error.message);
+        setError("Kon de status niet wijzigen: " + error.message);
         return;
       }
-      await supabase.from("invoice_lines").delete().eq("invoice_id", editing.id);
-    } else {
-      const { data, error } = await supabase.from("invoices").insert(invoicePayload).select().single();
-      if (error || !data) {
-        setSaving(false);
-        setError(error?.message ?? "Onbekende fout");
-        return;
-      }
-      invoiceId = data.id;
+      setModalOpen(false);
+      void loadInvoices(user.id);
+      return;
     }
 
-    const linePayload = lines
-      .filter((l) => l.description.trim() !== "")
-      .map((l, idx) => ({
-        invoice_id: invoiceId,
-        user_id: user.id,
+    const validLines = lines.filter((l) => l.description.trim() !== "");
+
+    const { error } = await supabase.rpc("save_invoice", {
+      p_id: editing?.id ?? null,
+      p_invoice_number: invoiceNumber,
+      p_customer_id: customerId || null,
+      p_status: status,
+      p_issue_date: issueDate,
+      p_due_date: dueDate || null,
+      p_lines: validLines.map((l) => ({
         description: l.description,
         quantity: l.quantity,
         unit_price: l.unit_price,
         vat_rate: l.vat_rate,
-        sort_order: idx,
-      }));
-
-    if (linePayload.length > 0) {
-      const { error } = await supabase.from("invoice_lines").insert(linePayload);
-      if (error) {
-        setSaving(false);
-        setError(error.message);
-        return;
-      }
-    }
+      })),
+    });
 
     setSaving(false);
+    if (error) {
+      setError(
+        error.message.includes("duplicate key") && error.message.includes("invoice_number")
+          ? "Dit factuurnummer bestaat al. Kies een ander nummer."
+          : error.message
+      );
+      return;
+    }
     setModalOpen(false);
     void loadInvoices(user.id);
   }
 
   async function handleDelete(invoice: Invoice) {
     if (!user) return;
-    if (!confirm(`Factuur ${invoice.invoice_number} verwijderen?`)) return;
-    await supabase.from("invoices").delete().eq("id", invoice.id);
+    if (invoice.status === "betaald") {
+      alert("Betaalde facturen kunnen niet verwijderd worden.");
+      return;
+    }
+    if (!confirm(`Factuur ${invoice.invoice_number} verwijderen? Dit kan niet ongedaan gemaakt worden.`)) return;
+    const { error } = await supabase.from("invoices").delete().eq("id", invoice.id);
+    if (error) {
+      alert("Verwijderen mislukt: " + error.message);
+      return;
+    }
     void loadInvoices(user.id);
   }
 
-  function invoiceTotal(invoice: Invoice) {
-    return (invoice.invoice_lines ?? []).reduce((sum, l) => {
-      const subtotal = l.quantity * l.unit_price;
-      return sum + subtotal + subtotal * (l.vat_rate / 100);
-    }, 0);
+  function invoiceTotalCents(invoice: Invoice) {
+    return sumLineCents(
+      (invoice.invoice_lines ?? []).map((l) => ({
+        quantity: l.quantity,
+        unitPrice: l.unit_price,
+        vatRate: l.vat_rate,
+      }))
+    ).totalCents;
   }
 
   return (
@@ -228,15 +262,26 @@ export function InvoicesPage() {
                   {inv.customers?.name ?? "Geen klant"} · {formatDate(inv.issue_date)}
                 </p>
                 <p className="mt-1 text-sm font-medium text-slate-700">
-                  {formatCurrency(invoiceTotal(inv))}
+                  {formatCentsCurrency(invoiceTotalCents(inv))}
                 </p>
               </div>
               <div className="flex shrink-0 gap-1">
-                <Button variant="ghost" size="sm" onClick={() => openEdit(inv)}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => openEdit(inv)}
+                  title={inv.status === "betaald" ? "Bekijk (nummer, klant en datum liggen vast)" : "Bewerken"}
+                >
                   <Pencil size={15} />
                 </Button>
-                <Button variant="ghost" size="sm" onClick={() => handleDelete(inv)}>
-                  <Trash2 size={15} className="text-red-500" />
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => handleDelete(inv)}
+                  disabled={inv.status === "betaald"}
+                  title={inv.status === "betaald" ? "Betaalde facturen kunnen niet verwijderd worden" : "Verwijderen"}
+                >
+                  <Trash2 size={15} className={inv.status === "betaald" ? "text-slate-300" : "text-red-500"} />
                 </Button>
               </div>
             </CardContent>
@@ -250,6 +295,12 @@ export function InvoicesPage() {
         title={editing ? "Factuur bewerken" : "Nieuwe factuur"}
         className="sm:max-w-2xl"
       >
+        {editing?.status === "betaald" && (
+          <div className="mb-4 rounded-lg bg-amber-50 p-3 text-sm text-amber-800">
+            Deze factuur is betaald en ligt vast. Je kunt alleen nog de status wijzigen
+            (bijvoorbeeld bij een correctie).
+          </div>
+        )}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div>
@@ -257,6 +308,7 @@ export function InvoicesPage() {
               <Input
                 id="invoiceNumber"
                 required
+                disabled={editing?.status === "betaald"}
                 value={invoiceNumber}
                 onChange={(e) => setInvoiceNumber(e.target.value)}
               />
@@ -265,6 +317,7 @@ export function InvoicesPage() {
               <Label htmlFor="customer">Klant</Label>
               <Select
                 id="customer"
+                disabled={editing?.status === "betaald"}
                 value={customerId}
                 onChange={(e) => setCustomerId(e.target.value)}
               >
@@ -282,6 +335,7 @@ export function InvoicesPage() {
                 id="issueDate"
                 type="date"
                 required
+                disabled={editing?.status === "betaald"}
                 value={issueDate}
                 onChange={(e) => setIssueDate(e.target.value)}
               />
@@ -291,6 +345,7 @@ export function InvoicesPage() {
               <Input
                 id="dueDate"
                 type="date"
+                disabled={editing?.status === "betaald"}
                 value={dueDate}
                 onChange={(e) => setDueDate(e.target.value)}
               />
@@ -311,7 +366,7 @@ export function InvoicesPage() {
             </div>
           </div>
 
-          <div>
+          <fieldset disabled={editing?.status === "betaald"} className="disabled:opacity-60">
             <div className="mb-2 flex items-center justify-between">
               <Label className="mb-0">Factuurregels</Label>
               <Button type="button" variant="outline" size="sm" onClick={addLine}>
@@ -357,7 +412,8 @@ export function InvoicesPage() {
                   <button
                     type="button"
                     onClick={() => removeLine(idx)}
-                    className="col-span-1 flex justify-center text-slate-400 hover:text-red-500"
+                    disabled={lines.length === 1}
+                    className="col-span-1 flex justify-center text-slate-400 hover:text-red-500 disabled:opacity-30"
                   >
                     <Trash2 size={15} />
                   </button>
@@ -365,12 +421,12 @@ export function InvoicesPage() {
               ))}
             </div>
             <p className="mt-3 text-right text-sm font-semibold text-slate-900">
-              Totaal (incl. btw): {formatCurrency(total)}
+              Totaal (incl. btw): {formatCentsCurrency(totalCents)}
             </p>
-          </div>
+          </fieldset>
 
           {error && <p className="text-sm text-red-600">{error}</p>}
-          <Button type="submit" className="w-full" disabled={saving}>
+          <Button type="submit" className="w-full" disabled={saving || invoiceNumber === "Genereren..."}>
             {saving ? "Opslaan..." : "Factuur opslaan"}
           </Button>
         </form>

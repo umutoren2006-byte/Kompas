@@ -3,15 +3,16 @@ import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Select } from "@/components/ui/Input";
-import { formatCurrency, currentQuarter, quarterRange } from "@/lib/utils";
+import { currentQuarter, quarterRange } from "@/lib/utils";
+import { vatCentsFor, formatCentsCurrency } from "@/lib/money";
 
 export function VatOverviewPage() {
   const { user } = useAuth();
   const { quarter: defaultQ, year: defaultY } = currentQuarter();
   const [quarter, setQuarter] = useState(defaultQ);
   const [year, setYear] = useState(defaultY);
-  const [vatCollected, setVatCollected] = useState(0);
-  const [vatPaid, setVatPaid] = useState(0);
+  const [vatCollectedCents, setVatCollectedCents] = useState(0);
+  const [vatPaidCents, setVatPaidCents] = useState(0);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
@@ -29,23 +30,21 @@ export function VatOverviewPage() {
       .gte("transaction_date", start)
       .lte("transaction_date", end);
 
-    let collected = 0;
-    let paid = 0;
+    let collectedCents = 0;
+    let paidCents = 0;
     for (const t of transactions ?? []) {
-      const amount = Number(t.amount);
-      const vatRate = Number(t.vat_rate);
-      // amount is assumed to be the net/excl.-btw bedrag per transactie
-      const vat = amount * (vatRate / 100);
-      if (t.type === "inkomst") collected += vat;
-      else paid += vat;
+      // Bedrag wordt aangenomen als het netto (excl. btw) bedrag per transactie.
+      const vatCents = vatCentsFor(Number(t.amount), Number(t.vat_rate));
+      if (t.type === "inkomst") collectedCents += vatCents;
+      else paidCents += vatCents;
     }
 
-    setVatCollected(collected);
-    setVatPaid(paid);
+    setVatCollectedCents(collectedCents);
+    setVatPaidCents(paidCents);
     setLoading(false);
   }
 
-  const balance = vatCollected - vatPaid;
+  const balanceCents = vatCollectedCents - vatPaidCents;
 
   return (
     <div>
@@ -75,7 +74,7 @@ export function VatOverviewPage() {
           <CardContent>
             <p className="text-sm text-slate-500">Btw ontvangen (over omzet)</p>
             <p className="mt-1 text-2xl font-semibold text-slate-900">
-              {loading ? "…" : formatCurrency(vatCollected)}
+              {loading ? "…" : formatCentsCurrency(vatCollectedCents)}
             </p>
           </CardContent>
         </Card>
@@ -83,17 +82,17 @@ export function VatOverviewPage() {
           <CardContent>
             <p className="text-sm text-slate-500">Btw betaald (over kosten)</p>
             <p className="mt-1 text-2xl font-semibold text-slate-900">
-              {loading ? "…" : formatCurrency(vatPaid)}
+              {loading ? "…" : formatCentsCurrency(vatPaidCents)}
             </p>
           </CardContent>
         </Card>
         <Card className="border-indigo-200 bg-indigo-50">
           <CardContent>
             <p className="text-sm text-indigo-700">
-              {balance >= 0 ? "Af te dragen" : "Terug te vorderen"}
+              {balanceCents >= 0 ? "Af te dragen" : "Terug te vorderen"}
             </p>
             <p className="mt-1 text-2xl font-semibold text-indigo-900">
-              {loading ? "…" : formatCurrency(Math.abs(balance))}
+              {loading ? "…" : formatCentsCurrency(Math.abs(balanceCents))}
             </p>
           </CardContent>
         </Card>

@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Input, Label, Select } from "@/components/ui/Input";
 import { Modal } from "@/components/ui/Modal";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate, todayLocalDateString } from "@/lib/utils";
 
 const categories = {
   inkomst: ["Verkoop", "Dienstverlening", "Overig"],
@@ -27,7 +27,7 @@ export function TransactionsPage() {
   const [description, setDescription] = useState("");
   const [amount, setAmount] = useState("");
   const [vatRate, setVatRate] = useState(21);
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(todayLocalDateString());
 
   useEffect(() => {
     if (user) void loadTransactions(user.id);
@@ -50,7 +50,7 @@ export function TransactionsPage() {
     setDescription("");
     setAmount("");
     setVatRate(21);
-    setDate(new Date().toISOString().slice(0, 10));
+    setDate(todayLocalDateString());
     setError(null);
     setModalOpen(true);
   }
@@ -58,6 +58,17 @@ export function TransactionsPage() {
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     if (!user) return;
+
+    const amountValue = Number(amount);
+    if (!amount || Number.isNaN(amountValue) || amountValue <= 0) {
+      setError("Vul een bedrag groter dan €0,00 in.");
+      return;
+    }
+    if (!date) {
+      setError("Datum is verplicht.");
+      return;
+    }
+
     setSaving(true);
     setError(null);
 
@@ -82,8 +93,12 @@ export function TransactionsPage() {
 
   async function handleDelete(t: Transaction) {
     if (!user) return;
-    if (!confirm("Deze transactie verwijderen?")) return;
-    await supabase.from("transactions").delete().eq("id", t.id);
+    if (!confirm("Deze transactie verwijderen? Dit kan niet ongedaan gemaakt worden.")) return;
+    const { error } = await supabase.from("transactions").delete().eq("id", t.id);
+    if (error) {
+      alert("Verwijderen mislukt: " + error.message);
+      return;
+    }
     void loadTransactions(user.id);
   }
 

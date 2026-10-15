@@ -86,8 +86,17 @@ export function CustomersPage() {
 
   async function handleDelete(customer: Customer) {
     if (!user) return;
-    if (!confirm(`Klant "${customer.name}" verwijderen?`)) return;
-    await supabase.from("customers").delete().eq("id", customer.id);
+    if (
+      !confirm(
+        `Klant "${customer.name}" verwijderen? Bestaande facturen blijven bewaard, maar raken ongekoppeld van deze klant.`
+      )
+    )
+      return;
+    const { error } = await supabase.from("customers").delete().eq("id", customer.id);
+    if (error) {
+      alert("Verwijderen mislukt: " + error.message);
+      return;
+    }
     void loadCustomers(user.id);
   }
 
