@@ -9,6 +9,10 @@ export interface Profile {
   kvk_number: string | null;
   vat_number: string | null;
   address: string | null;
+  iban: string | null;
+  email: string | null;
+  phone: string | null;
+  invoice_footer: string | null;
 }
 
 export interface Customer {
@@ -33,7 +37,10 @@ export interface Invoice {
   due_date: string | null;
   notes: string | null;
   created_at: string;
-  customers?: Pick<Customer, "id" | "name" | "company_name"> | null;
+  sent_at: string | null;
+  sent_to_email: string | null;
+  send_error: string | null;
+  customers?: Pick<Customer, "id" | "name" | "company_name" | "email" | "address" | "vat_number"> | null;
   invoice_lines?: InvoiceLine[];
 }
 

@@ -4,7 +4,20 @@ AI-first boekhoudapp voor Nederlandse zzp'ers en kleine ondernemingen.
 
 ## Status
 
-**Fase 2 (betrouwbaarheid & beveiliging) is doorgevoerd.** Wat echt werkt:
+**Fase 3 (facturen professioneel maken) is doorgevoerd, bovenop fase 2.** Wat echt werkt:
+
+- Factuur-PDF genereren in Kompas-huisstijl (bedrijfsgegevens, klantgegevens,
+  regels, btw-specificatie per tarief, betaalgegevens) — direct downloadbaar
+  vanuit de facturenlijst
+- Bedrijfs- en betaalgegevens instellen (Instellingen-pagina): naam, KvK,
+  btw-nummer, adres, e-mail, telefoon, IBAN, factuurvoettekst
+- Factuur per e-mail versturen naar de klant mét PDF-bijlage (Supabase Edge
+  Function + Resend) — vereist **handmatige deploy en secret-configuratie**,
+  zie "Facturen per e-mail versturen" hieronder
+- Verzendstatus zichtbaar per factuur: wanneer en naar welk adres verstuurd,
+  of een foutmelding als het versturen mislukte
+
+**Fase 2 (betrouwbaarheid & beveiliging), al eerder doorgevoerd:**
 
 - Registreren / inloggen (Supabase Auth)
 - Dashboard met omzet/kosten/winst/openstaande facturen — berekend uit echte
@@ -26,7 +39,7 @@ AI-first boekhoudapp voor Nederlandse zzp'ers en kleine ondernemingen.
 - Geen bankkoppeling / automatisch afletteren van transacties
 - Geen automatische btw-aangifte bij de Belastingdienst
 - Geen AI-assistent
-- Geen factuur-PDF of e-mailverzending (fase 3)
+- Geen terugkerende taken of automatische betalingsherinneringen (fase 3-vervolg)
 
 ## Tech stack
 
@@ -44,6 +57,10 @@ AI-first boekhoudapp voor Nederlandse zzp'ers en kleine ondernemingen.
    - `supabase/migrations/0002_hardening.sql` — cross-tabel eigendomscontrole,
      data-constraints, atomische factuurnummering, bescherming van betaalde
      facturen, storage-limieten, extra indexen
+   - `supabase/migrations/0003_invoicing_settings.sql` — betaalgegevens op het
+     profiel, verzendstatus op facturen, RPC's voor het markeren van
+     verzonden facturen en verzendfouten (gebruikt door de send-invoice
+     edge function, zie "Facturen per e-mail versturen" hieronder)
 3. Kopieer `.env.example` naar `.env.local` en vul je project-URL en anon key in
    (Supabase dashboard → Project Settings → API). Deze waarden horen **niet** in git.
 4. Installeer dependencies en start de dev-server:
@@ -67,6 +84,51 @@ AI-first boekhoudapp voor Nederlandse zzp'ers en kleine ondernemingen.
   Supabase-versie), stel dit dan handmatig in via Dashboard → Storage →
   receipts → Edit bucket (max 10 MB, image/png, image/jpeg, image/webp,
   image/heic, application/pdf).
+
+## Facturen per e-mail versturen (handmatige configuratie, fase 3)
+
+De PDF-generatie en download werken zonder extra configuratie. Het **versturen
+per e-mail** vereist een eenmalige handmatige deploy, omdat dit niet via een
+SQL-migratie kan:
+
+1. **Resend-account**: maak een gratis account op [resend.com](https://resend.com)
+   en kopieer een API-key. Voor productiegebruik: verifieer je eigen domein bij
+   Resend (anders kun je alleen naar je eigen, geverifieerde testadres sturen).
+2. **Supabase CLI installeren en inloggen** (lokaal, niet in deze repo):
+   ```bash
+   npm install -g supabase
+   supabase login
+   supabase link --project-ref <jouw-project-ref>
+   ```
+3. **De edge function deployen**:
+   ```bash
+   supabase functions deploy send-invoice
+   ```
+4. **Secrets instellen** (nooit in `.env` of git — dit zijn server-side
+   secrets voor de edge function):
+   ```bash
+   supabase secrets set RESEND_API_KEY=re_jouw_sleutel
+   # Optioneel, standaard is het Resend-testadres:
+   supabase secrets set SEND_INVOICE_FROM_EMAIL="Kompas <facturen@jouwdomein.nl>"
+   ```
+5. Vul in Kompas onder **Instellingen** je IBAN en bedrijfsgegevens in — deze
+   verschijnen op de factuur-PDF.
+
+**Hoe het werkt** (voor controleerbaarheid): de PDF wordt in de browser
+gegenereerd (dezelfde code als de downloadknop) en als bijlage meegestuurd
+naar de edge function. De edge function gebruikt de JWT van de ingelogde
+gebruiker (niet een service-role key) om de factuur en het klant-e-mailadres
+op te halen, zodat Row Level Security ook hier van toepassing blijft — een
+gebruiker kan nooit andermans factuur versturen, ook niet door een ander
+`invoice_id` mee te sturen in het verzoek. Na een geslaagde verzending wordt
+de factuurstatus bijgewerkt via `mark_invoice_sent`; bij een fout (bv.
+verkeerde API-key, geen krediet bij Resend) wordt deze vastgelegd via
+`record_invoice_send_error` en zichtbaar gemaakt in de facturenlijst, in
+plaats van stil te falen.
+
+Zonder deze configuratie werkt de rest van de app gewoon door; de
+verstuur-knop toont dan een duidelijke Nederlandse foutmelding met een
+verwijzing naar deze sectie.
 
 ## Build & checks
 
@@ -136,6 +198,34 @@ Niet alleen "de build slaagt" — concreet uitgevoerd:
 6. **Unit-tests** (`npm run test`) voor geld-/btw-rekenwerk (inclusief de
    klassieke 0.1+0.2-float-valkuil) en kwartaalgrenzen, ook getest in
    meerdere tijdzones.
+
+## Hoe fase 3 is getest
+
+1. **PDF-generatie daadwerkelijk uitgevoerd en visueel gecontroleerd**: een
+   realistische voorbeeldfactuur (3 regels, btw-tarieven 21%/9%/0%, een
+   niet-geheel aantal om afronding te toetsen) is gegenereerd met de echte
+   `InvoicePdf`-code, als PDF weggeschreven en pagina voor pagina bekeken —
+   layout, Nederlandse labels, btw-specificatie per tarief, totalen en het
+   betaalblok (dat alleen verschijnt als IBAN is ingevuld) kloppen.
+2. **De nieuwe database-functies (`mark_invoice_sent`,
+   `record_invoice_send_error`) echt uitgevoerd** tegen een lokale Postgres,
+   niet alleen gelezen: een factuur aangemaakt, een verzendfout vastgelegd
+   (status bleef `concept`, `send_error` gevuld), daarna succesvol gemarkeerd
+   als verzonden (`send_error` weer leeg, status naar `verzonden`,
+   `sent_at`/`sent_to_email` gevuld).
+3. **Cross-gebruiker-toegang opnieuw getest** met twee losse databasegebruikers:
+   een tweede gebruiker die `record_invoice_send_error` op de factuur van de
+   eerste probeerde aan te roepen, werd geweigerd ("Factuur niet gevonden of
+   geen toegang") — de nieuwe RPC's zijn dus niet een nieuw lek in de
+   eigendomscontrole uit fase 2.
+4. `npx tsc -b`, `npm run lint`, `npm run test` (14/14) en `npm run build`
+   zijn allemaal uitgevoerd op de volledige fase 3-code en slagen.
+5. De edge function zelf (`supabase/functions/send-invoice`) kon **niet**
+   end-to-end tegen een echte Resend-mailbox getest worden vanuit deze
+   omgeving (geen live Supabase-project of Resend-account beschikbaar hier).
+   De database-kant (RPC's) is wel echt getest zoals hierboven beschreven; de
+   HTTP-aanroep naar Resend zelf moet je na deploy met een eigen testfactuur
+   verifiëren.
 
 ## Gevonden en opgeloste problemen (fase 2-audit)
 

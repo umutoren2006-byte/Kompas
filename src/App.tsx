@@ -12,6 +12,7 @@ import { TransactionsPage } from "@/pages/TransactionsPage";
 import { ReceiptsPage } from "@/pages/ReceiptsPage";
 import { VatOverviewPage } from "@/pages/VatOverviewPage";
 import { TasksPage } from "@/pages/TasksPage";
+import { SettingsPage } from "@/pages/SettingsPage";
 
 function App() {
   return (
@@ -36,6 +37,7 @@ function App() {
             <Route path="bonnetjes" element={<ReceiptsPage />} />
             <Route path="btw" element={<VatOverviewPage />} />
             <Route path="taken" element={<TasksPage />} />
+            <Route path="instellingen" element={<SettingsPage />} />
           </Route>
         </Routes>
       </AuthProvider>

@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { Plus, Trash2, Pencil } from "lucide-react";
+import { Plus, Trash2, Pencil, Download, Send, Loader2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 import { useAuth } from "@/context/AuthContext";
-import type { Customer, Invoice, InvoiceLine, InvoiceStatus } from "@/types/database";
+import type { Customer, Invoice, InvoiceLine, InvoiceStatus, Profile } from "@/types/database";
 import { Button } from "@/components/ui/Button";
 import { Card, CardContent } from "@/components/ui/Card";
 import { Input, Label, Select } from "@/components/ui/Input";
@@ -10,6 +10,7 @@ import { Modal } from "@/components/ui/Modal";
 import { Badge } from "@/components/ui/Badge";
 import { formatDate, todayLocalDateString } from "@/lib/utils";
 import { sumLineCents, formatCentsCurrency } from "@/lib/money";
+import { downloadInvoicePdf, generateInvoicePdfBase64 } from "@/lib/InvoicePdf";
 
 const statusLabels: Record<InvoiceStatus, { label: string; variant: "default" | "success" | "warning" | "danger" | "info" }> = {
   concept: { label: "Concept", variant: "default" },
@@ -26,9 +27,12 @@ export function InvoicesPage() {
   const { user } = useAuth();
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [customers, setCustomers] = useState<Customer[]>([]);
+  const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [editing, setEditing] = useState<Invoice | null>(null);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
+  const [sendingId, setSendingId] = useState<string | null>(null);
 
   const [invoiceNumber, setInvoiceNumber] = useState("");
   const [customerId, setCustomerId] = useState("");
@@ -43,6 +47,7 @@ export function InvoicesPage() {
     if (user) {
       void loadInvoices(user.id);
       void loadCustomers(user.id);
+      void loadProfile(user.id);
     }
   }, [user]);
 
@@ -50,7 +55,7 @@ export function InvoicesPage() {
     setLoading(true);
     const { data } = await supabase
       .from("invoices")
-      .select("*, customers(id, name, company_name), invoice_lines(*)")
+      .select("*, customers(id, name, company_name, email, address, vat_number), invoice_lines(*)")
       .eq("user_id", userId)
       .order("issue_date", { ascending: false });
     setInvoices((data as unknown as Invoice[]) ?? []);
@@ -60,6 +65,11 @@ export function InvoicesPage() {
   async function loadCustomers(userId: string) {
     const { data } = await supabase.from("customers").select("*").eq("user_id", userId).order("name");
     setCustomers(data ?? []);
+  }
+
+  async function loadProfile(userId: string) {
+    const { data } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle<Profile>();
+    setProfile(data);
   }
 
   async function openNew() {
@@ -222,6 +232,48 @@ export function InvoicesPage() {
     ).totalCents;
   }
 
+  async function handleDownloadPdf(invoice: Invoice) {
+    setDownloadingId(invoice.id);
+    try {
+      await downloadInvoicePdf(invoice, profile);
+    } catch (err) {
+      alert("PDF genereren mislukt: " + (err instanceof Error ? err.message : "onbekende fout"));
+    } finally {
+      setDownloadingId(null);
+    }
+  }
+
+  async function handleSendEmail(invoice: Invoice) {
+    if (!invoice.customers?.email) {
+      alert("Deze klant heeft geen e-mailadres. Vul dit eerst in bij Klanten.");
+      return;
+    }
+    if (!confirm(`Factuur ${invoice.invoice_number} per e-mail versturen naar ${invoice.customers.email}?`))
+      return;
+
+    setSendingId(invoice.id);
+    try {
+      const pdfBase64 = await generateInvoicePdfBase64(invoice, profile);
+      const { data: sessionData } = await supabase.auth.getSession();
+      const accessToken = sessionData.session?.access_token;
+      const { data, error } = await supabase.functions.invoke("send-invoice", {
+        body: { invoice_id: invoice.id, pdf_base64: pdfBase64 },
+        headers: accessToken ? { Authorization: `Bearer ${accessToken}` } : undefined,
+      });
+      if (error) throw error;
+      if (data?.error) throw new Error(data.error);
+      if (user) void loadInvoices(user.id);
+    } catch (err) {
+      alert(
+        "Versturen mislukt: " +
+          (err instanceof Error ? err.message : "onbekende fout") +
+          "\n\nControleer of de send-invoice edge function is gedeployed en RESEND_API_KEY is ingesteld (zie README)."
+      );
+    } finally {
+      setSendingId(null);
+    }
+  }
+
   return (
     <div>
       <div className="flex items-center justify-between">
@@ -264,8 +316,48 @@ export function InvoicesPage() {
                 <p className="mt-1 text-sm font-medium text-slate-700">
                   {formatCentsCurrency(invoiceTotalCents(inv))}
                 </p>
+                {inv.sent_at && (
+                  <p className="mt-0.5 text-xs text-emerald-600">
+                    Verstuurd naar {inv.sent_to_email} op {formatDate(inv.sent_at)}
+                  </p>
+                )}
+                {inv.send_error && (
+                  <p className="mt-0.5 text-xs text-red-600">Versturen mislukt: {inv.send_error}</p>
+                )}
               </div>
               <div className="flex shrink-0 gap-1">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => handleDownloadPdf(inv)}
+                  disabled={downloadingId === inv.id}
+                  title="Download als PDF"
+                >
+                  {downloadingId === inv.id ? (
+                    <Loader2 size={15} className="animate-spin" />
+                  ) : (
+                    <Download size={15} />
+                  )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => handleSendEmail(inv)}
+                  disabled={sendingId === inv.id || inv.status === "betaald"}
+                  title={
+                    inv.status === "betaald"
+                      ? "Al betaald"
+                      : inv.customers?.email
+                        ? `Verstuur naar ${inv.customers.email}`
+                        : "Klant heeft geen e-mailadres"
+                  }
+                >
+                  {sendingId === inv.id ? (
+                    <Loader2 size={15} className="animate-spin" />
+                  ) : (
+                    <Send size={15} />
+                  )}
+                </Button>
                 <Button
                   variant="ghost"
                   size="sm"
